@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctp500-printer-app"
+version = "1.2.3"
+description = "Windows desktop catalog, character, encounter, and print-spooling app for CTP500 thermal printers."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "Pillow>=10.0",
+]
+
+[project.gui-scripts]
+ctp500-printer = "ctp500_app:run"
+
+[tool.setuptools]
+packages = ["ctp500_app"]

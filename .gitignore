@@ -1,0 +1,33 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Test, build, and packaging output
+.coverage
+.pytest_cache/
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# User-local application data and generated files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+config.json
+catalog_cache.json
+backups/
+logs/
+*.download
+*.part
+*.restore
+*.tmp
