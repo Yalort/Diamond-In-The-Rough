@@ -1,6 +1,6 @@
 # CTP500 Live Gear and Minion Printer
 
-Current release: **v1.2.3**
+Current release: **v1.2.4**
 
 ## Download
 
@@ -13,6 +13,13 @@ TAR archives with each release.
 The app checks the canonical GitHub Releases page for stable versions on startup.
 After confirmation it opens that page in your browser; executable replacement is
 never performed automatically. Use **Check for updates** to check again at any time.
+
+## Release builds
+
+Push a tag matching the application version (for example, `v1.2.4`) to run the
+Windows release workflow. The workflow runs the test suite, verifies that the tag
+matches `ctp500_app/_version.py`, and publishes a versioned standalone executable
+and SHA-256 checksum to the corresponding GitHub Release.
 
 A Windows desktop app that reads a user-selected Google Sheets gear dataset,
 lets you search and filter its gear, and prints category-aware tags on a paired

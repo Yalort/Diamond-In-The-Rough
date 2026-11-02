@@ -1,0 +1,70 @@
+name: Build Windows release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install application and build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller==6.21.0
+
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $version = python -c "from ctp500_app import __version__; print(__version__)"
+          $expectedTag = "v$version"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Tag ${{ github.ref_name }} does not match application version $expectedTag."
+          }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+          "EXE_NAME=Diamond-In-The-Rough-v$version.exe" >> $env:GITHUB_ENV
+
+      - name: Run tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Build standalone executable
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm --onefile --windowed `
+            --name "Diamond-In-The-Rough-v$env:APP_VERSION" `
+            CTP500_GUI_app_Github_Export.py
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $executable = Join-Path dist $env:EXE_NAME
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash.ToLowerInvariant()
+          "$hash  $env:EXE_NAME" | Set-Content -Encoding ascii "$executable.sha256"
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "dist/$env:EXE_NAME" `
+            "dist/$env:EXE_NAME.sha256" `
+            --title "Diamond in the Rough ${{ github.ref_name }}" `
+            --generate-notes `
+            --verify-tag

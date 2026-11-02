@@ -17,6 +17,7 @@ dist/
 .env
 .env.*
 !.env.example
+AGENTS.md
 
 # User-local application data and generated files
 *.db

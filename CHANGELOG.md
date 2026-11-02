@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.4] - 2026-11-02
+
+### Changed
+
+- Prepared the first executable release in the new repository with a tag-validated Windows build that publishes a versioned executable and SHA-256 checksum.
+- Added `AGENTS.md` to the repository ignore rules.
+
 ## [1.2.3] - 2026-11-02
 
 ### Security
@@ -191,3 +198,5 @@ All notable changes to this project are documented here. Releases follow
 [1.2.2]: https://github.com/Yalort/RoughDiamondGearPrinter-EncounterTracker/compare/v1.2.1...v1.2.2
 
 [1.2.3]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.2...v1.2.3
+
+[1.2.4]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.3...v1.2.4
