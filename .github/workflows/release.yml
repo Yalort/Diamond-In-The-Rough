@@ -48,7 +48,29 @@ jobs:
         run: |
           pyinstaller --clean --noconfirm --onefile --windowed `
             --name "Diamond-In-The-Rough-v$env:APP_VERSION" `
+            --hidden-import ctp500_app.sheets_writeback `
+            --hidden-import google.auth.transport.requests `
+            --hidden-import google.oauth2.credentials `
+            --hidden-import google_auth_oauthlib.flow `
+            --hidden-import googleapiclient.discovery `
             CTP500_GUI_app_Github_Export.py
+
+      - name: Verify bundled Google Sheets integration
+        shell: pwsh
+        run: |
+          $executable = Join-Path dist $env:EXE_NAME
+          $archive = pyi-archive_viewer --recursive --brief $executable | Out-String
+          foreach ($module in @(
+            "ctp500_app.sheets_writeback",
+            "google.auth.transport.requests",
+            "google.oauth2.credentials",
+            "google_auth_oauthlib.flow",
+            "googleapiclient.discovery"
+          )) {
+            if ($archive -notmatch [regex]::Escape($module)) {
+              throw "Standalone executable is missing required module: $module"
+            }
+          }
 
       - name: Create checksum
         shell: pwsh

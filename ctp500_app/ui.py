@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from uuid import uuid4
 
 from ._version import __version__
-from .catalog import CatalogClient, CatalogError, filter_items, manufacturer_options, natural_key
+from .catalog import CatalogClient, CatalogError, filter_items, kind_options, manufacturer_options, natural_key
 from .catalog_cache import load_catalog_cache, save_catalog_cache
 from .backup import BackupError, export_backup, restore_backup, validate_backup
 from .character_data import RACES, RACE_GROUPS, race_parent
@@ -77,10 +77,11 @@ from .models import CatalogSnapshot, GearItem, JobStatus, PrintDocument
 from .printer import BluetoothPrinter, normalize_address
 from .rendering import tag_text
 from .spooler import PrintSpooler
+from .sheets_writeback import GoogleSheetsWriteBack
 from .updater import RELEASES_PAGE_URL, ReleaseInfo, fetch_latest_release, is_newer
-from .ui_widgets import FormField, choose_records, prompt_form
+from .ui_widgets import DelayedTreeviewTooltip, FormField, choose_records, prompt_form
 from .encounter_workflow import weapon_ammo, change_weapon_ammo
-from .encounter_panels import encounter_panel_content, feature_label
+from .encounter_panels import encounter_panel_content, equipment_tooltip_text, feature_label
 
 
 LOGGER = logging.getLogger("ctp500.ui")
@@ -95,6 +96,7 @@ MERCHANT_TAG_PRESETS: tuple[tuple[str, str], ...] = (
     ("Vehicle dealer", "Vehicles"),
 )
 TOUGHNESS_COLORS = {"base": "#000000", "armor": "#d97706", "shield": "#1769aa", "both": "#2e7d32"}
+IMMUTABLE_SOURCE_ID_FIELDS = frozenset({"ID", "Item ID", "ItemID", "UUID"})
 
 
 GENERAL_COLUMNS = (
@@ -180,6 +182,12 @@ class GearPrinterApp:
         self.root.minsize(980, 620)
 
         self.client = CatalogClient()
+        # Source editing is an optional capability.  Keep the catalog and
+        # printer fully usable when the Sheets editor (or its Google
+        # dependencies) is not installed/configured.
+        self.source_editor = None
+        self._source_edit_dialog: tk.Toplevel | None = None
+        self._source_edit_context: dict[str, object] | None = None
         self.printer = BluetoothPrinter()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.spooler = PrintSpooler(self.printer, listener=lambda: self.events.put(("jobs", None)))
@@ -225,6 +233,8 @@ class GearPrinterApp:
             self.client = CatalogClient(dataset_url=settings.dataset_url)
         except CatalogError:
             self.client = CatalogClient()
+        # Recreate the optional writer after loading the persisted dataset URL.
+        self.source_editor = self._build_source_editor()
         self.column_widths = {
             view: dict(widths) for view, widths in settings.column_widths.items()
         }
@@ -350,7 +360,10 @@ class GearPrinterApp:
             box = ttk.Combobox(filters, textvariable=variable, state="readonly", width=18)
             box.grid(row=0, column=column * 2 - 1, padx=(5, 10), sticky="ew")
             box["values"] = ("All",)
-            box.bind("<<ComboboxSelected>>", lambda _event: self._refresh_catalog_view())
+            box.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, selected=label: self._filter_selected(selected),
+            )
             self.filter_boxes[label] = box
         ttk.Button(filters, text="Clear", command=self._clear_filters).grid(row=0, column=10)
         filters.columnconfigure(1, weight=2)
@@ -381,7 +394,23 @@ class GearPrinterApp:
         table_frame.columnconfigure(0, weight=1)
         self.catalog_tree.bind("<<TreeviewSelect>>", self._show_details)
         self.catalog_tree.bind("<Double-1>", self._quick_print)
+        self.catalog_tree.bind("<Button-3>", self._catalog_context_menu)
         self.catalog_tree.bind("<ButtonRelease-1>", self._column_resize_finished, add="+")
+
+        catalog_actions = ttk.Frame(table_frame)
+        catalog_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self.edit_source_button = ttk.Button(
+            catalog_actions,
+            text="Edit source entry…",
+            command=self._open_source_editor,
+            state="disabled" if not self.source_editor else "normal",
+        )
+        self.edit_source_button.pack(side="left")
+        ttk.Label(
+            catalog_actions,
+            text="Changes require Google authorization, confirmation, and a fresh-row check.",
+            foreground="#667085",
+        ).pack(side="left", padx=(8, 0))
 
         details_frame = ttk.LabelFrame(catalog_panel, text="Source details and printed tag", padding=5)
         catalog_panel.add(details_frame, weight=2)
@@ -456,7 +485,7 @@ class GearPrinterApp:
         ttk.Checkbutton(controls, text="Guarantee weapon", variable=self.char_guarantee_weapon_var).grid(row=0, column=10, sticky="w")
         ttk.Button(controls, text="Race chances…", command=self._open_race_editor).grid(row=1, column=10, padx=5)
         ttk.Button(controls, text="Generate", command=self._generate_character).grid(row=1, column=11, padx=5)
-        ttk.Button(controls, text="New seed", command=self._generate_new_seed).grid(row=1, column=12, padx=2)
+        ttk.Button(controls, text="Copy Seed", command=self._copy_character_seed).grid(row=1, column=12, padx=2)
         ttk.Scale(controls, from_=0, to=1_000_000, variable=self.char_budget_var).grid(row=2, column=0, columnspan=13, sticky="ew", pady=(5, 0))
         budget_references = ttk.Frame(controls)
         budget_references.grid(row=3, column=0, columnspan=13)
@@ -1569,6 +1598,16 @@ class GearPrinterApp:
             self.encounter_gear_tree.heading(column, text=column)
             self.encounter_gear_tree.column(column, width=45)
         self.encounter_gear_tree.pack(fill="both", expand=True)
+        self.encounter_gear_tooltips = (
+            DelayedTreeviewTooltip(
+                self.encounter_action_tree, self._encounter_action_gear_tooltip_text),
+            DelayedTreeviewTooltip(
+                self.encounter_bionics_tree, self._encounter_gear_tooltip_text),
+            DelayedTreeviewTooltip(
+                self.encounter_inventory_tree, self._encounter_gear_tooltip_text),
+            DelayedTreeviewTooltip(
+                self.encounter_gear_tree, self._encounter_gear_tooltip_text),
+        )
         row = ttk.Frame(gear)
         row.pack(fill="x")
         ttk.Button(row, text="Add…", command=self._encounter_add_gear).pack(side="left", fill="x", expand=True)
@@ -2829,6 +2868,26 @@ class GearPrinterApp:
 
         source_kind, separator, source_id = action.source.partition(":")
         return source_id if separator and source_kind in {"Gear", "Bionic"} else ""
+
+    def _encounter_gear_tooltip_text(self, item_id: str) -> str:
+        """Return full snapshot data for an encounter equipment row."""
+
+        combatant = self._selected_encounter_combatant()
+        character = combatant.character() if combatant else None
+        item = next(
+            (entry for entry in character.equipment if entry.id == item_id), None
+        ) if character else None
+        return equipment_tooltip_text(item) if item else ""
+
+    def _encounter_action_gear_tooltip_text(self, action_id: str) -> str:
+        """Resolve a derived action to its catalog-backed equipment tooltip."""
+
+        combatant = self._selected_encounter_combatant()
+        action = next(
+            (entry for entry in combatant.actions if entry.id == action_id), None
+        ) if combatant else None
+        source_id = self._encounter_action_source_item_id(action) if action else ""
+        return self._encounter_gear_tooltip_text(source_id) if source_id else ""
 
     def _encounter_pick_action(self, _event=None) -> None:
         chosen = self.encounter_action_picker_var.get()
@@ -4660,19 +4719,22 @@ class GearPrinterApp:
         except ValueError as exc:
             messagebox.showwarning("Cannot generate", str(exc))
             return
-        self.char_seed_var.set(str(self.current_character.seed))
-        self._load_character_into_editor(self.current_character)
+        self._load_character_into_editor(self.current_character, populate_seed=False)
         if requested_race == "Random":
             self.char_race_var.set("Random")
         if requested_role == "Random":
             self.char_role_var.set("Random")
         self.char_status_var.set(f"Generated seed {self.current_character.seed}; {len(self.current_character.equipment)} items selected.")
 
-    def _generate_new_seed(self) -> None:
-        self.char_seed_var.set("")
-        self._generate_character()
+    def _copy_character_seed(self) -> None:
+        if not self.current_character:
+            self.char_status_var.set("Generate or load a character before copying its seed.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(self.current_character.seed))
+        self.char_status_var.set(f"Copied seed {self.current_character.seed} to the clipboard.")
 
-    def _load_character_into_editor(self, character: Character) -> None:
+    def _load_character_into_editor(self, character: Character, *, populate_seed: bool = True) -> None:
         self.current_character = character
         self.expanded_character_items.clear()
         self.essential_character_items.clear()
@@ -4682,7 +4744,8 @@ class GearPrinterApp:
         self.char_role_var.set(character.role)
         self.char_race_var.set(character.race)
         self.char_budget_var.set(character.budget)
-        self.char_seed_var.set(str(character.seed))
+        if populate_seed:
+            self.char_seed_var.set(str(character.seed))
         for key in ABILITY_KEYS:
             self.ability_vars[key].set(character.base_abilities.get(key, 0))
         for key in DEFENSE_KEYS:
@@ -5285,6 +5348,254 @@ class GearPrinterApp:
             parent=self.root,
         )
 
+    def _build_source_editor(self):
+        """Create the bundled Sheets editor for the configured dataset."""
+        dataset_url = getattr(getattr(self, "dataset_url_var", None), "get", lambda: "")().strip()
+        if not dataset_url:
+            return None
+        try:
+            return GoogleSheetsWriteBack(dataset_url=dataset_url)
+        except Exception:
+            LOGGER.exception("Could not initialize the Google Sheets source editor")
+            return None
+
+    def _source_editor_available(self) -> bool:
+        return self.source_editor is not None
+
+    def _source_editor_authorized(self) -> bool | None:
+        editor = self.source_editor
+        if editor is None:
+            return False
+        value = getattr(editor, "is_authorized", None)
+        if callable(value):
+            try:
+                return bool(value())
+            except Exception:
+                return None
+        if value is not None:
+            return bool(value)
+        return None
+
+    @staticmethod
+    def _source_authorize_method(editor):
+        return getattr(editor, "authorize", None) or getattr(editor, "authorize_google", None)
+
+    @staticmethod
+    def _source_editor_client_configured(editor) -> bool:
+        configured = getattr(editor, "client_configured", None)
+        if callable(configured):
+            try:
+                return bool(configured())
+            except Exception:
+                return False
+        return False
+
+    def _catalog_context_menu(self, event) -> str:
+        iid = self.catalog_tree.identify_row(event.y)
+        if iid and iid in self.item_by_iid:
+            if iid not in self.catalog_tree.selection():
+                self.catalog_tree.selection_set(iid)
+            menu = tk.Menu(self.root, tearoff=False)
+            menu.add_command(
+                label="Edit source entry…",
+                command=self._open_source_editor,
+                state="normal" if self.source_editor else "disabled",
+            )
+            menu.add_command(label="Queue selected", command=self._queue_selected)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        return "break"
+
+    def _open_source_editor(self) -> None:
+        selected = self._selected_items()
+        if len(selected) != 1:
+            messagebox.showwarning("Select one entry", "Select exactly one catalog entry to edit.", parent=self.root)
+            return
+        if self.source_editor is None:
+            messagebox.showinfo(
+                "Source editing unavailable",
+                "Install/configure the optional Google Sheets editor in Data Management first.",
+                parent=self.root,
+            )
+            return
+        if self._source_edit_dialog is not None and self._source_edit_dialog.winfo_exists():
+            self._source_edit_dialog.lift()
+            self._source_edit_dialog.focus_force()
+            return
+
+        item = selected[0]
+        window = tk.Toplevel(self.root)
+        self._source_edit_dialog = window
+        self._source_edit_context = {"item": item, "vars": {}, "save_button": None}
+        window.title(f"Edit source entry — {item.name}")
+        window.transient(self.root)
+        window.grab_set()
+        window.geometry("680x560")
+        window.minsize(560, 360)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            window,
+            text=f"{item.category} · source sheet {item.source_gid}, row {item.source_row}",
+            foreground="#475467",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 5))
+        body = ttk.Frame(window, padding=(12, 0, 12, 0))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        form = ttk.Frame(canvas)
+        form.columnconfigure(1, weight=1)
+        canvas_window = canvas.create_window((0, 0), window=form, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        body.bind("<Configure>", lambda event: canvas.itemconfigure(canvas_window, width=event.width))
+        form.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        variables: dict[str, tk.StringVar] = self._source_edit_context["vars"]  # type: ignore[assignment]
+        for row, (label, value) in enumerate(item.fields):
+            variable = tk.StringVar(value=value)
+            variables[label] = variable
+            ttk.Label(form, text=label + ":").grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=4)
+            if label in IMMUTABLE_SOURCE_ID_FIELDS and value:
+                editor = ttk.Entry(form, textvariable=variable, state="readonly")
+                editor.grid(row=row, column=1, sticky="ew", pady=3)
+            elif len(value) > 120 or "note" in label.casefold() or "description" in label.casefold() or "effect" in label.casefold():
+                editor = tk.Text(form, height=4, wrap="word")
+                editor.insert("1.0", value)
+                editor.grid(row=row, column=1, sticky="ew", pady=3)
+                variables[label] = editor  # type: ignore[assignment]
+            else:
+                ttk.Entry(form, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=3)
+
+        buttons = ttk.Frame(window, padding=12)
+        buttons.grid(row=2, column=0, sticky="ew")
+        status = tk.StringVar(value="Review the fields, then choose Save changes.")
+        ttk.Label(buttons, textvariable=status, foreground="#667085").pack(side="left", fill="x", expand=True)
+        save_button = ttk.Button(buttons, text="Save changes", command=lambda: self._confirm_source_edit(window, status))
+        save_button.pack(side="right")
+        self._source_edit_context["status"] = status
+        self._source_edit_context["save_button"] = save_button
+        cancel_button = ttk.Button(buttons, text="Cancel", command=self._close_source_editor)
+        cancel_button.pack(side="right", padx=(0, 6))
+        self._source_edit_context["cancel_button"] = cancel_button
+        window.protocol("WM_DELETE_WINDOW", self._close_source_editor)
+
+    def _source_edit_values(self) -> dict[str, str]:
+        context = self._source_edit_context or {}
+        values = context.get("vars", {})
+        result: dict[str, str] = {}
+        for label, variable in values.items():  # type: ignore[union-attr]
+            if isinstance(variable, tk.Text):
+                result[label] = variable.get("1.0", "end-1c").strip()
+            else:
+                result[label] = variable.get().strip()
+        return result
+
+    @staticmethod
+    def _changed_source_fields(item: GearItem, values: dict[str, str]) -> dict[str, str]:
+        """Return only fields whose submitted value differs from the snapshot."""
+        original = dict(item.fields)
+        return {
+            label: values.get(label, "")
+            for label, old in original.items()
+            if values.get(label, "") != old
+        }
+
+    def _confirm_source_edit(self, window: tk.Toplevel, status: tk.StringVar) -> None:
+        context = self._source_edit_context
+        if not context:
+            return
+        item: GearItem = context["item"]  # type: ignore[assignment]
+        original = dict(item.fields)
+        values = self._source_edit_values()
+        changes = self._changed_source_fields(item, values)
+        if not changes:
+            status.set("No changes to save.")
+            return
+        summary = "\n".join(f"• {label}: {original[label]!r} → {value!r}" for label, value in changes.items())
+        if not messagebox.askyesno(
+            "Confirm source edit",
+            f"Write these {len(changes)} changed field(s) to the original Google Sheet?\n\n"
+            f"The row will be checked first; avoid simultaneous edits in Google Sheets. "
+            f"Values use normal Sheets typing rules.\n\n{summary}",
+            parent=window,
+        ):
+            return
+        button = context.get("save_button")
+        if button is not None:
+            button.configure(state="disabled")
+        cancel_button = context.get("cancel_button")
+        if cancel_button is not None:
+            cancel_button.configure(state="disabled")
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: messagebox.showinfo(
+                "Save in progress",
+                "The confirmed Google Sheets update is still in progress.",
+                parent=window,
+            ),
+        )
+        status.set("Saving to Google Sheets…")
+        self._source_edit_in_background(item, changes, window)
+
+    def _source_edit_in_background(self, item: GearItem, changes: dict[str, str], window: tk.Toplevel) -> None:
+        editor = self.source_editor
+
+        def save() -> None:
+            try:
+                if editor is None:
+                    raise RuntimeError("Source editing is not configured.")
+                update = (
+                    getattr(editor, "update_item", None)
+                    or getattr(editor, "edit_item", None)
+                    or getattr(editor, "update_row", None)
+                )
+                if not callable(update):
+                    raise RuntimeError("The source editor does not implement update_item(item, changes).")
+                update(item, changes)
+                self.events.put(("source_edit_result", (True, "", window)))
+            except Exception as exc:
+                LOGGER.warning("Source entry update failed: %s", exc)
+                self.events.put(("source_edit_result", (False, str(exc), window)))
+
+        threading.Thread(target=save, name="source-entry-edit", daemon=True).start()
+
+    def _close_source_editor(self) -> None:
+        window = self._source_edit_dialog
+        self._source_edit_dialog = None
+        self._source_edit_context = None
+        if window is not None and window.winfo_exists():
+            window.grab_release()
+            window.destroy()
+
+    def _handle_source_edit_result(self, success: bool, detail: str, window: tk.Toplevel) -> None:
+        context = self._source_edit_context or {}
+        status = context.get("status")
+        if success:
+            self._close_source_editor()
+            self.sync_status_var.set("Catalog: source entry saved — refreshing")
+            self._request_refresh()
+            messagebox.showinfo("Source entry saved", "The source row was updated. The catalog will refresh shortly.", parent=self.root)
+            return
+        if status is not None:
+            status.set("Save failed; no local catalog changes were made.")
+        save_button = context.get("save_button")
+        if save_button is not None and window.winfo_exists():
+            save_button.configure(state="normal")
+        cancel_button = context.get("cancel_button")
+        if cancel_button is not None and window.winfo_exists():
+            cancel_button.configure(state="normal")
+            window.protocol("WM_DELETE_WINDOW", self._close_source_editor)
+        lowered = detail.casefold()
+        title = "Source row changed" if any(token in lowered for token in ("conflict", "changed", "stale", "etag")) else "Source edit failed"
+        messagebox.showwarning(title, detail or "The source row could not be updated.", parent=window if window.winfo_exists() else self.root)
+
     def _open_data_management(self) -> None:
         window = tk.Toplevel(self.root)
         window.title("Data Management")
@@ -5299,6 +5610,27 @@ class GearPrinterApp:
         dataset_entry.pack(fill="x", pady=(2, 0))
         ttk.Label(body, text="Save a public Google Sheets share link. The link stays only in this computer's settings and is not bundled with the app.", wraplength=540).pack(anchor="w", pady=(3, 0))
         ttk.Button(body, text="Save dataset", command=lambda: self._save_dataset_url(window)).pack(anchor="w", pady=(6, 0))
+        if self.source_editor is not None and callable(self._source_authorize_method(self.source_editor)):
+            oauth = ttk.LabelFrame(body, text="Google Sheets editing (optional)", padding=8)
+            oauth.pack(fill="x", pady=(12, 0))
+            ttk.Label(
+                oauth,
+                text="Sign in through your browser to allow source edits. The first sign-in asks for a Google Desktop OAuth client JSON file; later sign-ins reuse it.",
+                wraplength=520,
+            ).pack(anchor="w")
+            oauth_buttons = ttk.Frame(oauth)
+            oauth_buttons.pack(fill="x", pady=(7, 0))
+            authorized = bool(self._source_editor_authorized())
+            self.oauth_status_var = tk.StringVar(
+                value="Signed in" if authorized else "Not signed in"
+            )
+            ttk.Label(oauth_buttons, textvariable=self.oauth_status_var).pack(side="left")
+            self.oauth_signin_button = ttk.Button(
+                oauth_buttons,
+                text="Change Google account…" if authorized else "Sign in with Google…",
+                command=self._authorize_source_editor,
+            )
+            self.oauth_signin_button.pack(side="right")
         if self.storage_error:
             ttk.Label(
                 body,
@@ -5318,6 +5650,76 @@ class GearPrinterApp:
         ttk.Button(buttons, text="Open Log Folder", command=self._open_log_folder).pack(side="left")
         ttk.Button(buttons, text="Close", command=window.destroy).pack(side="right")
 
+    def _choose_oauth_client(self) -> Path | None:
+        filename = filedialog.askopenfilename(
+            parent=self.root,
+            title="Choose Google OAuth client JSON",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if filename:
+            return Path(filename)
+        return None
+
+    def _set_oauth_signin_button(self, *, enabled: bool, authorized: bool = False) -> None:
+        button = getattr(self, "oauth_signin_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(
+                state="normal" if enabled else "disabled",
+                text="Change Google account…" if authorized else "Sign in with Google…",
+            )
+        except tk.TclError:
+            pass
+
+    def _authorize_source_editor(self) -> None:
+        editor = self.source_editor
+        authorize_method = self._source_authorize_method(editor) if editor is not None else None
+        if editor is None or not callable(authorize_method):
+            return
+        authorized = bool(self._source_editor_authorized())
+        path = None
+        if not self._source_editor_client_configured(editor):
+            messagebox.showinfo(
+                "Google OAuth setup",
+                "Choose the Desktop OAuth client JSON downloaded for this app. After that, sign-in continues in your browser.",
+                parent=self.root,
+            )
+            path = self._choose_oauth_client()
+            if path is None:
+                return
+        elif authorized and not messagebox.askyesno(
+            "Change Google account?",
+            "Open the browser and replace the currently saved Google authorization?",
+            parent=self.root,
+        ):
+            return
+        if hasattr(self, "oauth_status_var"):
+            self.oauth_status_var.set("Waiting for browser sign-in…")
+        self._set_oauth_signin_button(enabled=False, authorized=authorized)
+
+        def authorize() -> None:
+            try:
+                authorize_method(str(path) if path is not None else None, force=authorized)
+                self.events.put(("source_authorize_result", (True, "")))
+            except Exception as exc:
+                LOGGER.warning("Google Sheets authorization failed: %s", exc)
+                self.events.put(("source_authorize_result", (False, str(exc))))
+
+        threading.Thread(target=authorize, name="source-editor-authorize", daemon=True).start()
+
+    def _handle_source_authorize_result(self, success: bool, detail: str) -> None:
+        if not hasattr(self, "oauth_status_var"):
+            return
+        if success:
+            self.oauth_status_var.set("Signed in")
+            self._set_oauth_signin_button(enabled=True, authorized=True)
+            messagebox.showinfo("Google sign-in complete", "Google Sheets source editing is ready.", parent=self.root)
+        else:
+            self.oauth_status_var.set("Sign-in failed")
+            self._set_oauth_signin_button(enabled=True)
+            messagebox.showwarning("Google sign-in failed", detail or "Google authorization could not be completed.", parent=self.root)
+
     def _save_dataset_url(self, parent: tk.Misc) -> None:
         value = self.dataset_url_var.get().strip()
         if not value:
@@ -5329,6 +5731,11 @@ class GearPrinterApp:
             messagebox.showwarning("Invalid dataset link", str(exc), parent=parent)
             return
         self.client = client
+        self.source_editor = self._build_source_editor()
+        if hasattr(self, "edit_source_button"):
+            self.edit_source_button.configure(
+                state="normal" if self.source_editor is not None else "disabled"
+            )
         self.snapshot = None
         self._snapshot_is_cached = False
         self._refresh_catalog_view()
@@ -5517,6 +5924,12 @@ class GearPrinterApp:
                         self.update_button.configure(state="normal")
                     if not automatic:
                         messagebox.showwarning("Update check failed", error, parent=self.root)
+                elif event == "source_edit_result":
+                    success, detail, window = payload  # type: ignore[misc]
+                    self._handle_source_edit_result(bool(success), str(detail), window)
+                elif event == "source_authorize_result":
+                    success, detail = payload  # type: ignore[misc]
+                    self._handle_source_authorize_result(bool(success), str(detail))
         except queue.Empty:
             pass
         self.root.after(100, self._drain_events)
@@ -5533,10 +5946,11 @@ class GearPrinterApp:
 
     def _update_filter_values(self) -> None:
         items = self.snapshot.items if self.snapshot else ()
+        category = self.category_var.get()
         options = {
             "Category": [name for name, _gid in CATEGORY_GIDS],
             "Manufacturer": manufacturer_options(items),
-            "Kind": sorted({item.kind for item in items if item.kind}, key=natural_key),
+            "Kind": kind_options(items, category),
             "Rank": sorted({item.rank for item in items if item.rank}, key=natural_key),
         }
         variables = {
@@ -5549,6 +5963,11 @@ class GearPrinterApp:
             self.filter_boxes[label]["values"] = ("All", *values)
             if variables[label].get() not in {"All", *values}:
                 variables[label].set("All")
+
+    def _filter_selected(self, label: str) -> None:
+        if label == "Category":
+            self._update_filter_values()
+        self._refresh_catalog_view()
 
     def _refresh_catalog_view(self) -> None:
         selected_identities = {

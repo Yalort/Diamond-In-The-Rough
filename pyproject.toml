@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctp500-printer-app"
-version = "1.2.4"
+version = "1.2.10"
 description = "Windows desktop catalog, character, encounter, and print-spooling app for CTP500 thermal printers."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "Pillow>=10.0",
+    "google-api-python-client>=2.0",
+    "google-auth-httplib2>=0.2",
+    "google-auth-oauthlib>=1.0",
 ]
 
 [project.gui-scripts]

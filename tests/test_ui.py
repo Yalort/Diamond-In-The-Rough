@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 import inspect
+import queue
 from datetime import datetime
+from unittest.mock import patch
 
 from ctp500_app.catalog import parse_category_csv
 from ctp500_app.ui import (
@@ -17,6 +19,7 @@ from ctp500_app.ui import (
 from ctp500_app.characters import Character, CharacterGenerator, EquipmentSelection, GeneratorSettings
 from ctp500_app.encounters import ActionCard, Combatant, ConditionInstance, EncounterSession, Objective, ResourceCounter, RuntimeModifier
 from ctp500_app.models import CatalogSnapshot
+from ctp500_app.sheets_writeback import GoogleSheetsWriteBack
 
 
 class CatalogTableTests(unittest.TestCase):
@@ -70,6 +73,91 @@ class CatalogTableTests(unittest.TestCase):
         self.assertFalse(stretch_catalog_column("Manufacturer", columns))
         self.assertTrue(stretch_catalog_column("Capacity", columns))
 
+    def test_source_edit_sends_only_changed_fields(self) -> None:
+        item = parse_category_csv(
+            "Weapons",
+            9,
+            b"Manufacturer,Name,Special Notes,Price\nAcme,Arc Gun,Two handed,25\n",
+        )[0]
+
+        changes = GearPrinterApp._changed_source_fields(
+            item,
+            {"Manufacturer": "Acme", "Name": "Arc Gun Mk II", "Special Notes": "Two handed", "Price": "30"},
+        )
+
+        self.assertEqual(changes, {"Name": "Arc Gun Mk II", "Price": "30"})
+
+
+class GoogleSheetsSignInTests(unittest.TestCase):
+    class VarStub:
+        def __init__(self):
+            self.value = ""
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    class EditorStub:
+        def __init__(self, authorized=False):
+            self.authorized = authorized
+            self.calls = []
+
+        def is_authorized(self):
+            return self.authorized
+
+        def client_configured(self):
+            return True
+
+        def authorize(self, client_path=None, *, force=False):
+            self.calls.append((client_path, force))
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def _app(self, *, authorized=False):
+        app = GearPrinterApp.__new__(GearPrinterApp)
+        app.source_editor = self.EditorStub(authorized)
+        app.events = queue.Queue()
+        app.oauth_status_var = self.VarStub()
+        app.root = object()
+        return app
+
+    def test_source_editor_uses_bundled_google_sheets_backend(self) -> None:
+        app = GearPrinterApp.__new__(GearPrinterApp)
+        app.dataset_url_var = self.VarStub()
+        app.dataset_url_var.set(
+            "https://docs.google.com/spreadsheets/d/aaaaaaaaaaaaaaaaaaaa/edit"
+        )
+
+        editor = app._build_source_editor()
+
+        self.assertIsInstance(editor, GoogleSheetsWriteBack)
+
+    def test_sign_in_reuses_client_and_starts_browser_authorization(self) -> None:
+        app = self._app()
+
+        with patch("ctp500_app.ui.threading.Thread", self.ImmediateThread):
+            app._authorize_source_editor()
+
+        self.assertEqual(app.source_editor.calls, [(None, False)])
+        self.assertEqual(app.events.get_nowait()[:2], ("source_authorize_result", (True, "")))
+
+    def test_change_account_forces_fresh_browser_authorization(self) -> None:
+        app = self._app(authorized=True)
+
+        with patch("ctp500_app.ui.messagebox.askyesno", return_value=True), patch(
+            "ctp500_app.ui.threading.Thread", self.ImmediateThread
+        ):
+            app._authorize_source_editor()
+
+        self.assertEqual(app.source_editor.calls, [(None, True)])
+
 
 class CharacterOrangeExpansionTests(unittest.TestCase):
     def _app(self):
@@ -122,6 +210,75 @@ class CharacterBudgetReferenceTests(unittest.TestCase):
 
         self.assertEqual(app.char_budget_var.value, 100_000)
         self.assertEqual(result, "break")
+
+
+class CharacterSeedControlsTests(unittest.TestCase):
+    class VarStub:
+        def __init__(self, value=""):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    def test_random_generation_keeps_seed_field_blank(self) -> None:
+        app = GearPrinterApp.__new__(GearPrinterApp)
+        app.snapshot = object()
+        app.char_seed_var = self.VarStub()
+        app.char_name_var = self.VarStub("Random character")
+        app.char_race_var = self.VarStub("Random")
+        app.char_role_var = self.VarStub("Random")
+        app.char_status_var = self.VarStub()
+        settings = type("SettingsStub", (), {"race": "Random", "role": "Random"})()
+        app._character_settings = lambda: settings
+        generated = type(
+            "CharacterStub",
+            (),
+            {"seed": 987654321, "equipment": [], "race": "Human", "role": "Generalist"},
+        )()
+        received_seeds = []
+        app.character_generator = type(
+            "GeneratorStub",
+            (),
+            {
+                "generate": lambda _self, _snapshot, _settings, *, name, seed: (
+                    received_seeds.append(seed) or generated
+                )
+            },
+        )()
+        load_calls = []
+        app._load_character_into_editor = (
+            lambda character, *, populate_seed=True: load_calls.append((character, populate_seed))
+        )
+
+        app._generate_character()
+
+        self.assertEqual(received_seeds, [None])
+        self.assertEqual(app.char_seed_var.get(), "")
+        self.assertEqual(load_calls, [(generated, False)])
+
+    def test_copy_seed_uses_current_character_without_populating_field(self) -> None:
+        app = GearPrinterApp.__new__(GearPrinterApp)
+        app.current_character = type("CharacterStub", (), {"seed": 2468})()
+        app.char_seed_var = self.VarStub()
+        app.char_status_var = self.VarStub()
+        clipboard = []
+        app.root = type(
+            "RootStub",
+            (),
+            {
+                "clipboard_clear": lambda _self: clipboard.clear(),
+                "clipboard_append": lambda _self, value: clipboard.append(value),
+            },
+        )()
+
+        app._copy_character_seed()
+
+        self.assertEqual(clipboard, ["2468"])
+        self.assertEqual(app.char_seed_var.get(), "")
+        self.assertEqual(app.char_status_var.get(), "Copied seed 2468 to the clipboard.")
 
 
 class EncounterHotkeyTests(unittest.TestCase):
@@ -441,6 +598,30 @@ class EncounterConsoleTests(unittest.TestCase):
         self.assertEqual(app.encounter_gear_tree.seen, ["blade"])
         self.assertEqual(app.encounter_stats_text.seen, ["gear-tag.first"])
         self.assertIn("source of Arc Blade", app.encounter_status_var.get())
+
+    def test_action_hover_resolves_full_dataset_from_connected_gear(self) -> None:
+        now = datetime.now().astimezone().isoformat()
+        gear = EquipmentSelection(
+            "blade", "Weapons", 1, 2, "Arc Blade", "Acme",
+            {"Rank": "5", "Special Notes": "Ignores shields"}, 20, 20,
+        )
+        source = Character(
+            "hero", "Hero", "Human", "Generalist", 5, 1, "digest", 100, 20,
+            {key: 0 for key in ("STR", "AGL", "FGT", "AWE", "STA", "DEX", "INT", "PRE")},
+            {key: 0 for key in ("DODGE", "PARRY", "FORT", "TOUGH", "WILL")},
+            [gear], [], [], {}, now, now,
+        )
+        actor = Combatant.from_character(source)
+        action = next(entry for entry in actor.actions if entry.source == "Gear:blade")
+        app = GearPrinterApp.__new__(GearPrinterApp)
+        app.current_encounter = EncounterSession(combatants=[actor])
+        app.encounter_tree = self.WidgetStub((actor.id,))
+
+        text = app._encounter_action_gear_tooltip_text(action.id)
+
+        self.assertIn("Arc Blade", text)
+        self.assertIn("Rank", text)
+        self.assertIn("Ignores shields", text)
 
     def test_action_source_jump_requires_shift_click(self) -> None:
         action = ActionCard(name="Strike")

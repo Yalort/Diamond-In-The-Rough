@@ -1,6 +1,6 @@
 # CTP500 Live Gear and Minion Printer
 
-Current release: **v1.2.4**
+Current release: **v1.2.10**
 
 ## Download
 
@@ -16,7 +16,7 @@ never performed automatically. Use **Check for updates** to check again at any t
 
 ## Release builds
 
-Push a tag matching the application version (for example, `v1.2.4`) to run the
+Push a tag matching the application version (for example, `v1.2.10`) to run the
 Windows release workflow. The workflow runs the test suite, verifies that the tag
 matches `ctp500_app/_version.py`, and publishes a versioned standalone executable
 and SHA-256 checksum to the corresponding GitHub Release.
@@ -90,7 +90,10 @@ python CTP500_GUI_app_Github_Export.py
    or change their random weights. Parent races are rolled first using the
    folded parent rows; expanded subrace weights are then applied only within
    the selected parent.
-3. Select **Generate**. The seed can be retained to reproduce the same base roll.
+3. Select **Generate**. Leaving Seed blank creates a fresh random roll without
+   filling the field, so each subsequent blank-seed generation remains random.
+   Use **Copy Seed** to copy the current character's seed for later reuse; paste
+   a seed into the field when you want to reproduce the same base roll.
    Multi-manufacturer catalog rows resolve to one persistent manufacturer.
    A manufacturer value of `All` expands to every manufacturer found in that
    item's catalog category, then resolves and persists one of them normally.
@@ -170,7 +173,9 @@ including bionic Strength and explicit bionic unarmed-strike bonuses. Weapon,
 bionic Damage, bionic Affliction, and active bionic utility actions are derived
 from each frozen character snapshot; custom actions use a
 single editor and can be published to the saved character's reusable action
-library.
+library. Hover for half a second over a catalog-backed Weapons / Actions,
+Bionics, or Inventory row to see the connected item's complete snapshot and
+source-dataset fields.
 
 The tracker also resolves custom damage-over-time conditions. **Burning** and
 **Poisoned** last 1d6 turns, deal a normal Toughness-resisted damage effect at
@@ -270,6 +275,25 @@ personal dataset or share link is bundled with the public release. The dataset
 must preserve the expected category tabs and column headers. Included category
 gids, polling interval, printer width, timeouts, and raster band size are
 centralized in `ctp500_app/config.py`; `Packing Sheet` is not included.
+
+When the catalog source supports editing, select an entry and choose its edit
+command to review the proposed changes, then explicitly confirm before writing
+them back to the source sheet. In **Data Management**, choose **Sign in with
+Google** to open authorization in the default browser. On the first sign-in the
+app asks once for a Desktop OAuth client JSON file, installs it locally, and
+reuses it for later browser sign-ins. Before saving, the app checks that the
+source row still matches the entry that was opened and refuses the update when
+that final check finds a changed row. Google Sheets does not provide an atomic
+compare-and-write for this update, so avoid editing the same row simultaneously
+in the app and in Sheets. If the sheet has a populated `ID`, `Item ID`, `ItemID`,
+or `UUID` column,
+the app uses that read-only immutable value to find an entry whose row moved.
+Saved values are interpreted by Google Sheets as though they were typed into
+the corresponding cells, including its normal number, date, and formula rules.
+The OAuth client and reusable token are stored under the application's local
+data folder, never in the checkout. A successful write refreshes the catalog and
+shows the updated entry. Catalog browsing remains read-only and available
+without OAuth credentials.
 
 ## Tests
 

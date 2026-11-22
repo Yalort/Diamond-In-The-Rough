@@ -243,6 +243,14 @@ def manufacturer_options(items: Iterable[GearItem]) -> list[str]:
     return sorted(names.values(), key=natural_key)
 
 
+def kind_options(items: Iterable[GearItem], category: str = "All") -> list[str]:
+    """Return the available normalized Type/Kind values for a category."""
+    return sorted(
+        {item.kind for item in items if item.kind and (category == "All" or item.category == category)},
+        key=natural_key,
+    )
+
+
 def _matches_manufacturer(item: GearItem, manufacturer: str) -> bool:
     if manufacturer == "All":
         return True

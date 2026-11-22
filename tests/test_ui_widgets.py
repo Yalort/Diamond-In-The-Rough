@@ -1,7 +1,7 @@
 """Regression coverage for the shared UI form value converter."""
 import unittest
 
-from ctp500_app.ui_widgets import FormField, parse_field_value
+from ctp500_app.ui_widgets import DelayedTreeviewTooltip, FormField, parse_field_value
 
 
 class FormFieldTests(unittest.TestCase):
@@ -33,6 +33,42 @@ class FormFieldTests(unittest.TestCase):
 
     def test_text_can_be_blank(self):
         self.assertEqual(parse_field_value(FormField("notes", "Notes"), " "), "")
+
+
+class DelayedTreeviewTooltipTests(unittest.TestCase):
+    class TreeStub:
+        def __init__(self):
+            self.bindings = {}
+            self.scheduled = []
+            self.cancelled = []
+            self.row = "gear-id"
+
+        def bind(self, event, callback, add=None):
+            self.bindings[event] = (callback, add)
+
+        def identify_row(self, _y):
+            return self.row
+
+        def after(self, delay, callback):
+            self.scheduled.append((delay, callback))
+            return "after-id"
+
+        def after_cancel(self, identity):
+            self.cancelled.append(identity)
+
+    def test_hover_waits_half_a_second_and_moving_off_cancels(self):
+        tree = self.TreeStub()
+        tooltip = DelayedTreeviewTooltip(tree, lambda _identity: "details")
+        event = type("EventStub", (), {"y": 4})()
+
+        tooltip._on_motion(event)
+
+        self.assertEqual(tree.scheduled[0][0], 500)
+        self.assertEqual(tooltip._item_id, "gear-id")
+        tree.row = ""
+        tooltip._on_motion(event)
+        self.assertEqual(tree.cancelled, ["after-id"])
+        self.assertEqual(tooltip._item_id, "")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,50 @@
 All notable changes to this project are documented here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.10] - 2026-11-22
+
+### Fixed
+
+- Bundled the Google Sheets OAuth and API modules into standalone Windows
+  releases and added a release-time archive check that fails when any required
+  integration module is missing.
+
+## [1.2.9] - 2026-11-22
+
+### Changed
+
+- Simplified Google Sheets authorization in Data Management to one browser-based
+  sign-in action that reuses the locally installed Desktop OAuth client and can
+  switch Google accounts without manually selecting the client file again.
+
+## [1.2.8] - 2026-11-22
+
+### Added
+
+- Added explicit, OAuth-authorized editing of supported Google Sheets source
+  rows, with confirmation, source-row conflict checking, and a catalog refresh
+  after successful writes. Read-only catalog browsing continues to work without
+  credentials.
+
+## [1.2.7] - 2026-11-22
+
+### Fixed
+
+- Limited the gear list Type/Kind filter options to values available in the selected category.
+
+## [1.2.6] - 2026-11-04
+
+### Added
+
+- Added half-second hover tooltips to catalog-backed encounter action, bionics, inventory, and gear rows, showing complete item snapshot metadata and source-dataset fields in a readable layout.
+
+## [1.2.5] - 2026-11-04
+
+### Fixed
+
+- Kept the Character Creator seed field blank after random generation so repeated generations continue to use fresh random seeds.
+- Replaced the New seed control with Copy Seed, which copies the current character's generated seed without changing the seed field.
+
 ## [1.2.4] - 2026-11-02
 
 ### Changed
@@ -200,3 +244,15 @@ All notable changes to this project are documented here. Releases follow
 [1.2.3]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.2...v1.2.3
 
 [1.2.4]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.3...v1.2.4
+
+[1.2.5]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.4...v1.2.5
+
+[1.2.6]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.5...v1.2.6
+
+[1.2.7]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.6...v1.2.7
+
+[1.2.8]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.7...v1.2.8
+
+[1.2.9]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.8...v1.2.9
+
+[1.2.10]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.9...v1.2.10

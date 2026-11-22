@@ -5,7 +5,11 @@ import inspect
 import unittest
 
 from ctp500_app.characters import Character, EquipmentSelection
-from ctp500_app.encounter_panels import encounter_panel_content, feature_label
+from ctp500_app.encounter_panels import (
+    encounter_panel_content,
+    equipment_tooltip_text,
+    feature_label,
+)
 from ctp500_app.encounters import ActionCard, Combatant
 from ctp500_app.ui import GearPrinterApp
 
@@ -63,6 +67,24 @@ class EncounterPanelTests(unittest.TestCase):
         self.assertEqual(feature_label("Winged Form (Flight 4; Extended Vision)"),
                          ("Winged Form", "(Flight 4; Extended Vision)"))
         self.assertEqual(feature_label("Keen Senses"), ("Keen Senses", ""))
+
+    def test_equipment_tooltip_includes_metadata_and_every_dataset_field(self):
+        item = EquipmentSelection(
+            id="blade", category="Weapons", source_gid=7, source_row=12,
+            name="Arc Blade", manufacturer="Acme", quantity=2,
+            fields={"Damage": "5", "Special Notes": "Arcing\nshock", "Empty": ""},
+            base_price=120, adjusted_price=108, capacity=1.5, corruption=2,
+            modifiers={"FGT": 1}, notes=["Two handed"], locked=True,
+        )
+
+        text = equipment_tooltip_text(item)
+
+        for expected in (
+            "Arc Blade", "Weapons", "Acme", "sheet 7, row 12", "Damage", "5",
+            "Special Notes", "Arcing shock", "Empty", "—", "FGT +1",
+            "Two handed", "Locked", "Yes",
+        ):
+            self.assertIn(expected, text)
 
     def test_quadrant_layout_uses_independent_resizable_panes(self):
         source = inspect.getsource(GearPrinterApp._build_encounter_ui)

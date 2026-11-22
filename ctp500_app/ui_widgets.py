@@ -10,6 +10,94 @@ from tkinter import ttk
 from typing import Any, Callable, Iterable, Sequence
 
 
+class DelayedTreeviewTooltip:
+    """Show row-specific text after the pointer rests over a Treeview row."""
+
+    DEFAULT_DELAY_MS = 500
+
+    def __init__(self, tree: ttk.Treeview, text_for_item: Callable[[str], str],
+                 *, delay_ms: int = DEFAULT_DELAY_MS) -> None:
+        self.tree = tree
+        self.text_for_item = text_for_item
+        self.delay_ms = delay_ms
+        self._item_id = ""
+        self._after_id: str | None = None
+        self._window: tk.Toplevel | None = None
+        tree.bind("<Motion>", self._on_motion, add="+")
+        tree.bind("<Leave>", self.hide, add="+")
+        tree.bind("<ButtonPress>", self.hide, add="+")
+        tree.bind("<MouseWheel>", self.hide, add="+")
+        tree.bind("<Button-4>", self.hide, add="+")
+        tree.bind("<Button-5>", self.hide, add="+")
+        tree.bind("<Destroy>", self.hide, add="+")
+
+    def _on_motion(self, event: tk.Event) -> None:
+        item_id = self.tree.identify_row(event.y)
+        if item_id == self._item_id:
+            return
+        self.hide()
+        self._item_id = item_id
+        if item_id:
+            self._after_id = self.tree.after(
+                self.delay_ms,
+                lambda expected=item_id: self._show(expected),
+            )
+
+    def _show(self, expected_item_id: str) -> None:
+        self._after_id = None
+        if expected_item_id != self._item_id:
+            return
+        try:
+            pointer_y = self.tree.winfo_pointery() - self.tree.winfo_rooty()
+            if self.tree.identify_row(pointer_y) != expected_item_id:
+                return
+        except tk.TclError:
+            return
+        text = self.text_for_item(expected_item_id)
+        if not text:
+            return
+        window = tk.Toplevel(self.tree)
+        window.wm_overrideredirect(True)
+        window.attributes("-topmost", True)
+        label = tk.Label(
+            window,
+            text=text,
+            justify="left",
+            anchor="nw",
+            background="#fffdf2",
+            foreground="#1f2937",
+            relief="solid",
+            borderwidth=1,
+            padx=9,
+            pady=7,
+            wraplength=620,
+            font="TkFixedFont",
+        )
+        label.pack()
+        window.update_idletasks()
+        x = self.tree.winfo_pointerx() + 16
+        y = self.tree.winfo_pointery() + 18
+        x = max(0, min(x, window.winfo_screenwidth() - window.winfo_reqwidth() - 8))
+        y = max(0, min(y, window.winfo_screenheight() - window.winfo_reqheight() - 8))
+        window.wm_geometry(f"+{x}+{y}")
+        self._window = window
+
+    def hide(self, _event: tk.Event | None = None) -> None:
+        if self._after_id is not None:
+            try:
+                self.tree.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except tk.TclError:
+                pass
+            self._window = None
+        self._item_id = ""
+
+
 @dataclass(frozen=True)
 class FormField:
     key: str

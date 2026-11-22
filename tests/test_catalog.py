@@ -8,6 +8,7 @@ from ctp500_app.catalog import (
     CatalogClient,
     CatalogError,
     filter_items,
+    kind_options,
     manufacturer_names,
     manufacturer_options,
     parse_category_csv,
@@ -78,6 +79,22 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(apparel.kind, "Chest")
         self.assertEqual(filter_items([weapon, apparel], query="arc", kind="Pistol"), [weapon])
         self.assertEqual(filter_items([weapon, apparel], category="Apparel"), [apparel])
+
+    def test_kind_options_are_limited_to_the_selected_category(self) -> None:
+        items = [
+            parse_category_csv(
+                "Weapons", 0,
+                b"Name,Form Factor\nArc Gun,Pistol\n",
+            )[0],
+            parse_category_csv(
+                "Apparel", 1,
+                b"Name,Coverage\nCooling Vest,Chest\n",
+            )[0],
+        ]
+
+        self.assertEqual(kind_options(items, "Weapons"), ["Pistol"])
+        self.assertEqual(kind_options(items, "Apparel"), ["Chest"])
+        self.assertEqual(kind_options(items), ["Chest", "Pistol"])
 
     def test_manufacturer_filter_splits_combined_values_and_is_inclusive(self) -> None:
         items = parse_category_csv(
