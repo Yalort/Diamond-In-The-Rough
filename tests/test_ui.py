@@ -14,11 +14,13 @@ from ctp500_app.ui import (
     TOUGHNESS_COLORS,
     catalog_columns,
     catalog_value,
+    queue_clipboard_text,
     stretch_catalog_column,
 )
 from ctp500_app.characters import Character, CharacterGenerator, EquipmentSelection, GeneratorSettings
 from ctp500_app.encounters import ActionCard, Combatant, ConditionInstance, EncounterSession, Objective, ResourceCounter, RuntimeModifier
-from ctp500_app.models import CatalogSnapshot
+from ctp500_app.models import CatalogSnapshot, JobStatus, PrintDocument, PrintJob
+from ctp500_app.spooler import PrintSpooler
 from ctp500_app.sheets_writeback import GoogleSheetsWriteBack
 
 
@@ -279,6 +281,109 @@ class CharacterSeedControlsTests(unittest.TestCase):
         self.assertEqual(clipboard, ["2468"])
         self.assertEqual(app.char_seed_var.get(), "")
         self.assertEqual(app.char_status_var.get(), "Copied seed 2468 to the clipboard.")
+
+
+class QueueClipboardTests(unittest.TestCase):
+    class VarStub:
+        def __init__(self, value=""):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    class TreeStub:
+        def __init__(self, selection):
+            self._selection = selection
+
+        def selection(self):
+            return self._selection
+
+    class RootStub:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.clipboard = []
+
+        def clipboard_clear(self):
+            self.clipboard.clear()
+
+        def clipboard_append(self, value):
+            if self.fail:
+                import tkinter as tk
+
+                raise tk.TclError("clipboard busy")
+            self.clipboard.append(value)
+
+    class PrinterStub:
+        connected = False
+
+    def test_clipboard_text_repeats_only_outstanding_copies_in_queue_order(self) -> None:
+        first = PrintJob.create(PrintDocument("First", "Notes", "First text"), 3)
+        first.remaining_copies = 2
+        second = PrintJob.create(PrintDocument("Second", "Notes", "Second text"), 1)
+
+        self.assertEqual(
+            queue_clipboard_text((first, second)),
+            "First text\n\n---\n\nFirst text\n\n---\n\nSecond text",
+        )
+
+    def test_send_selected_jobs_copies_text_and_marks_them_completed(self) -> None:
+        spooler = PrintSpooler(self.PrinterStub(), renderer=lambda _item: None)
+        try:
+            first, second = spooler.enqueue(
+                [
+                    PrintDocument("First", "Notes", "First text"),
+                    PrintDocument("Second", "Notes", "Second text"),
+                ],
+                1,
+            )
+            app = GearPrinterApp.__new__(GearPrinterApp)
+            app.spooler = spooler
+            app.root = self.RootStub()
+            app.queue_status_var = self.VarStub()
+            tree = self.TreeStub(("row-1", "row-2"))
+
+            app._send_selected_jobs_to_clipboard(
+                tree,
+                {"row-1": first, "row-2": second},
+            )
+
+            self.assertEqual(
+                app.root.clipboard,
+                ["First text\n\n---\n\nSecond text"],
+            )
+            self.assertTrue(
+                all(job.status == JobStatus.COMPLETED for job in spooler.jobs())
+            )
+            self.assertIn("2 queued prints", app.queue_status_var.get())
+        finally:
+            spooler.stop()
+
+    def test_clipboard_failure_releases_claim_without_completing_job(self) -> None:
+        spooler = PrintSpooler(self.PrinterStub(), renderer=lambda _item: None)
+        try:
+            job_id = spooler.enqueue(
+                [PrintDocument("First", "Notes", "First text")],
+                1,
+            )[0]
+            app = GearPrinterApp.__new__(GearPrinterApp)
+            app.spooler = spooler
+            app.root = self.RootStub(fail=True)
+            app.queue_status_var = self.VarStub()
+
+            with patch("ctp500_app.ui.messagebox.showerror"):
+                app._send_selected_jobs_to_clipboard(
+                    self.TreeStub(("row-1",)),
+                    {"row-1": job_id},
+                )
+
+            job = spooler.jobs()[0]
+            self.assertEqual(job.status, JobStatus.PENDING)
+            self.assertFalse(job._clipboard_claimed)
+        finally:
+            spooler.stop()
 
 
 class EncounterHotkeyTests(unittest.TestCase):

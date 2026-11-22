@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.11] - 2026-11-22
+
+### Added
+
+- Added multi-entry plain-text clipboard output to both shared print-queue
+  views; successful clipboard sends mark the selected outstanding entries as
+  completed without printing them.
+- Added a session-level **Suspend printing** toggle that pauses pending thermal
+  output after any active Bluetooth copy finishes.
+
 ## [1.2.10] - 2026-11-22
 
 ### Fixed
@@ -256,3 +266,5 @@ All notable changes to this project are documented here. Releases follow
 [1.2.9]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.8...v1.2.9
 
 [1.2.10]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.9...v1.2.10
+
+[1.2.11]: https://github.com/Yalort/Diamond-In-The-Rough/compare/v1.2.10...v1.2.11

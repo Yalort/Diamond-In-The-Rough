@@ -69,6 +69,7 @@ class PrintJob:
     status: JobStatus = JobStatus.PENDING
     error: str = ""
     cancel_requested: bool = False
+    _clipboard_claimed: bool = False
 
     @classmethod
     def create(cls, item: GearItem | PrintDocument, copies: int) -> "PrintJob":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import logging
 from dataclasses import replace
+from collections.abc import Iterable
 from typing import Callable
 
 from .models import GearItem, JobStatus, PrintDocument, PrintJob
@@ -27,6 +28,7 @@ class PrintSpooler:
         self._jobs: list[PrintJob] = []
         self._condition = threading.Condition()
         self._stopping = False
+        self._suspended = False
         self._thread = threading.Thread(
             target=self._worker,
             name="ctp500-print-spooler",
@@ -68,11 +70,11 @@ class PrintSpooler:
         changed = False
         with self._condition:
             job = self._find(job_id)
-            if job and job.status == JobStatus.PENDING:
+            if job and not job._clipboard_claimed and job.status == JobStatus.PENDING:
                 job.status = JobStatus.CANCELED
                 job.remaining_copies = 0
                 changed = True
-            elif job and job.status == JobStatus.PRINTING:
+            elif job and not job._clipboard_claimed and job.status == JobStatus.PRINTING:
                 job.cancel_requested = True
                 changed = True
             if changed:
@@ -85,7 +87,7 @@ class PrintSpooler:
         changed = False
         with self._condition:
             job = self._find(job_id)
-            if job and job.status == JobStatus.FAILED:
+            if job and not job._clipboard_claimed and job.status == JobStatus.FAILED:
                 job.status = JobStatus.PENDING
                 job.error = ""
                 job.cancel_requested = False
@@ -99,7 +101,11 @@ class PrintSpooler:
         changed = False
         with self._condition:
             for index, job in enumerate(self._jobs):
-                if job.id == job_id and job.status != JobStatus.PRINTING:
+                if (
+                    job.id == job_id
+                    and job.status != JobStatus.PRINTING
+                    and not job._clipboard_claimed
+                ):
                     self._jobs.pop(index)
                     changed = True
                     self._condition.notify_all()
@@ -121,6 +127,76 @@ class PrintSpooler:
     def wake(self) -> None:
         with self._condition:
             self._condition.notify_all()
+
+    @property
+    def suspended(self) -> bool:
+        with self._condition:
+            return self._suspended
+
+    def set_suspended(self, suspended: bool) -> None:
+        changed = False
+        with self._condition:
+            suspended = bool(suspended)
+            if self._suspended != suspended:
+                self._suspended = suspended
+                changed = True
+                self._condition.notify_all()
+        if changed:
+            self._notify()
+
+    def claim_for_clipboard(self, job_ids: Iterable[str]) -> tuple[PrintJob, ...]:
+        """Atomically reserve eligible queue entries for clipboard output."""
+        requested = set(job_ids)
+        claimed: list[PrintJob] = []
+        with self._condition:
+            for job in self._jobs:
+                if (
+                    job.id in requested
+                    and job.status in {JobStatus.PENDING, JobStatus.FAILED}
+                    and job.remaining_copies > 0
+                    and not job._clipboard_claimed
+                ):
+                    job._clipboard_claimed = True
+                    claimed.append(replace(job))
+            if claimed:
+                self._condition.notify_all()
+        if claimed:
+            self._notify()
+        return tuple(claimed)
+
+    def finish_clipboard_claim(self, job_ids: Iterable[str]) -> tuple[str, ...]:
+        """Complete clipboard-reserved entries after the clipboard write succeeds."""
+        requested = set(job_ids)
+        completed: list[str] = []
+        with self._condition:
+            for job in self._jobs:
+                if job.id in requested and job._clipboard_claimed:
+                    job.status = JobStatus.COMPLETED
+                    job.remaining_copies = 0
+                    job.error = ""
+                    job.cancel_requested = False
+                    job._clipboard_claimed = False
+                    completed.append(job.id)
+            if completed:
+                self._condition.notify_all()
+        if completed:
+            self._notify()
+        return tuple(completed)
+
+    def release_clipboard_claim(self, job_ids: Iterable[str]) -> tuple[str, ...]:
+        """Return clipboard-reserved entries to their original queue state."""
+        requested = set(job_ids)
+        released: list[str] = []
+        with self._condition:
+            for job in self._jobs:
+                if job.id in requested and job._clipboard_claimed:
+                    job._clipboard_claimed = False
+                    released.append(job.id)
+            if released:
+                self._condition.notify_all()
+        if released:
+            self._notify()
+        return tuple(released)
 
     def has_unfinished_jobs(self) -> bool:
         with self._condition:
@@ -147,7 +223,14 @@ class PrintSpooler:
         # A failed job intentionally blocks later work until Retry or Remove.
         if any(job.status == JobStatus.FAILED for job in self._jobs):
             return None
-        return next((job for job in self._jobs if job.status == JobStatus.PENDING), None)
+        return next(
+            (
+                job
+                for job in self._jobs
+                if job.status == JobStatus.PENDING and not job._clipboard_claimed
+            ),
+            None,
+        )
 
     def _worker(self) -> None:
         while True:
@@ -155,7 +238,8 @@ class PrintSpooler:
                 self._condition.wait_for(
                     lambda: self._stopping
                     or (
-                        self.printer.connected
+                        not self._suspended
+                        and self.printer.connected
                         and self._next_job() is not None
                     ),
                     timeout=1.0,
@@ -163,13 +247,17 @@ class PrintSpooler:
                 if self._stopping:
                     return
                 job = self._next_job()
-                if job is None or not self.printer.connected:
+                if job is None or not self.printer.connected or self._suspended:
                     continue
                 job.status = JobStatus.PRINTING
             self._notify()
 
             try:
                 while job.remaining_copies > 0:
+                    with self._condition:
+                        if self._suspended:
+                            job.status = JobStatus.PENDING
+                            break
                     image = self._renderer(job.item)
                     self.printer.print_image(image)
                     with self._condition:
@@ -178,9 +266,12 @@ class PrintSpooler:
                             job.remaining_copies = 0
                             job.status = JobStatus.CANCELED
                             break
+                        if self._suspended and job.remaining_copies > 0:
+                            job.status = JobStatus.PENDING
+                            break
                     self._notify()
                 with self._condition:
-                    if job.status == JobStatus.PRINTING:
+                    if job.status == JobStatus.PRINTING and job.remaining_copies == 0:
                         job.status = JobStatus.COMPLETED
             except Exception as exc:
                 with self._condition:

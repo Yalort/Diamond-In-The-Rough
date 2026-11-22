@@ -73,7 +73,7 @@ from .characters import (
     toughness_token_spans,
 )
 from .config import CATEGORY_GIDS, SYNC_INTERVAL_SECONDS, UserSettings, app_data_dir, load_user_settings, save_user_settings
-from .models import CatalogSnapshot, GearItem, JobStatus, PrintDocument
+from .models import CatalogSnapshot, GearItem, JobStatus, PrintDocument, PrintJob
 from .printer import BluetoothPrinter, normalize_address
 from .rendering import tag_text
 from .spooler import PrintSpooler
@@ -81,6 +81,18 @@ from .sheets_writeback import GoogleSheetsWriteBack
 from .updater import RELEASES_PAGE_URL, ReleaseInfo, fetch_latest_release, is_newer
 from .ui_widgets import DelayedTreeviewTooltip, FormField, choose_records, prompt_form
 from .encounter_workflow import weapon_ammo, change_weapon_ammo
+
+
+CLIPBOARD_PRINT_SEPARATOR = "\n\n---\n\n"
+
+
+def queue_clipboard_text(jobs: tuple[PrintJob, ...]) -> str:
+    """Return the outstanding printable copies in queue order as plain text."""
+    copies: list[str] = []
+    for job in jobs:
+        text = job.item.text if isinstance(job.item, PrintDocument) else tag_text(job.item)
+        copies.extend(text.strip() for _ in range(job.remaining_copies))
+    return CLIPBOARD_PRINT_SEPARATOR.join(copies)
 from .encounter_panels import encounter_panel_content, equipment_tooltip_text, feature_label
 
 
@@ -255,6 +267,8 @@ class GearPrinterApp:
         self.kind_var = tk.StringVar(value="All")
         self.rank_var = tk.StringVar(value="All")
         self.quantity_var = tk.IntVar(value=1)
+        self.suspend_printing_var = tk.BooleanVar(value=False)
+        self.queue_status_var = tk.StringVar()
         self.address_var = tk.StringVar(value=settings.bluetooth_address)
         self.sync_status_var = tk.StringVar(
             value=self._cached_catalog_status() if self.snapshot else "Catalog: unavailable — waiting for refresh"
@@ -424,12 +438,25 @@ class GearPrinterApp:
         main.add(spool_frame, weight=2)
         spool_controls = ttk.Frame(spool_frame)
         spool_controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(spool_controls, text="Copies:").pack(side="left")
-        ttk.Spinbox(spool_controls, from_=1, to=99, textvariable=self.quantity_var, width=4).pack(side="left", padx=5)
-        ttk.Button(spool_controls, text="Queue selected", command=self._queue_selected).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            spool_controls,
+            text="Send to clipboard",
+            command=lambda: self._send_selected_jobs_to_clipboard(self.spool_tree, self.job_by_iid),
+        ).pack(side="right")
+        ttk.Checkbutton(
+            spool_controls,
+            text="Suspend printing",
+            variable=self.suspend_printing_var,
+            command=self._toggle_printing_suspended,
+        ).pack(side="right", padx=(8, 8))
+        queue_controls = ttk.Frame(spool_controls)
+        queue_controls.pack(side="left", fill="x", expand=True)
+        ttk.Label(queue_controls, text="Copies:").pack(side="left")
+        ttk.Spinbox(queue_controls, from_=1, to=99, textvariable=self.quantity_var, width=4).pack(side="left", padx=5)
+        ttk.Button(queue_controls, text="Queue selected", command=self._queue_selected).pack(side="left", fill="x", expand=True)
 
         spool_columns = ("Item", "Category", "Copies", "Status")
-        self.spool_tree = ttk.Treeview(spool_frame, columns=spool_columns, show="headings", selectmode="browse")
+        self.spool_tree = ttk.Treeview(spool_frame, columns=spool_columns, show="headings", selectmode="extended")
         for column, width in (("Item", 180), ("Category", 105), ("Copies", 65), ("Status", 85)):
             self.spool_tree.heading(column, text=column)
             self.spool_tree.column(column, width=width, minwidth=55, stretch=column == "Item")
@@ -445,8 +472,9 @@ class GearPrinterApp:
         ttk.Button(actions, text="Retry", command=self._retry_job).pack(side="left", padx=4)
         ttk.Button(actions, text="Remove", command=self._remove_job).pack(side="left")
         ttk.Button(actions, text="Clear finished", command=self.spooler.clear_finished).pack(side="right")
+        ttk.Label(spool_frame, textvariable=self.queue_status_var, foreground="#365f3d", wraplength=500).pack(fill="x", pady=(6, 0))
         self.job_error_var = tk.StringVar()
-        ttk.Label(spool_frame, textvariable=self.job_error_var, foreground="#9c1c1c", wraplength=330).pack(fill="x", pady=(6, 0))
+        ttk.Label(spool_frame, textvariable=self.job_error_var, foreground="#9c1c1c", wraplength=500).pack(fill="x", pady=(3, 0))
 
         footer = ttk.Frame(self.gear_tab, padding=(0, 0, 0, 4))
         footer.pack(fill="x")
@@ -605,15 +633,31 @@ class GearPrinterApp:
 
         character_queue = ttk.LabelFrame(panes, text="Print queue", padding=6)
         panes.add(character_queue, weight=2)
+        character_queue_controls = ttk.Frame(character_queue)
+        character_queue_controls.pack(fill="x", pady=(0, 5))
+        ttk.Button(
+            character_queue_controls,
+            text="Send to clipboard",
+            command=lambda: self._send_selected_jobs_to_clipboard(
+                self.char_spool_tree,
+                self.char_job_by_iid,
+            ),
+        ).pack(side="right")
+        ttk.Checkbutton(
+            character_queue_controls,
+            text="Suspend printing",
+            variable=self.suspend_printing_var,
+            command=self._toggle_printing_suspended,
+        ).pack(side="right", padx=(0, 8))
         queue_columns = ("Item", "Category", "Copies", "Status")
-        self.char_spool_tree = ttk.Treeview(character_queue, columns=queue_columns, show="headings", selectmode="browse")
+        self.char_spool_tree = ttk.Treeview(character_queue, columns=queue_columns, show="headings", selectmode="extended")
         for column, width in (("Item", 150), ("Category", 85), ("Copies", 58), ("Status", 78)):
             self.char_spool_tree.heading(column, text=column)
             self.char_spool_tree.column(column, width=width, minwidth=45, stretch=column == "Item")
         char_spool_y = ttk.Scrollbar(character_queue, orient="vertical", command=self.char_spool_tree.yview)
         self.char_spool_tree.configure(yscrollcommand=char_spool_y.set)
         self.char_spool_tree.pack(side="top", fill="both", expand=True)
-        char_spool_y.place(relx=1.0, rely=0.0, relheight=0.75, anchor="ne")
+        char_spool_y.place(relx=1.0, rely=0.08, relheight=0.72, anchor="ne")
         self.char_spool_tree.bind("<<TreeviewSelect>>", self._show_char_job_error)
         queue_actions = ttk.Frame(character_queue)
         queue_actions.pack(fill="x", pady=(5, 0))
@@ -621,8 +665,9 @@ class GearPrinterApp:
         ttk.Button(queue_actions, text="Retry", command=lambda: self._char_job_action("retry")).pack(side="left", padx=3)
         ttk.Button(queue_actions, text="Remove", command=lambda: self._char_job_action("remove")).pack(side="left")
         ttk.Button(queue_actions, text="Clear finished", command=self.spooler.clear_finished).pack(side="right")
+        ttk.Label(character_queue, textvariable=self.queue_status_var, foreground="#365f3d", wraplength=360).pack(fill="x", pady=(5, 0))
         self.char_job_error_var = tk.StringVar()
-        ttk.Label(character_queue, textvariable=self.char_job_error_var, foreground="#9c1c1c", wraplength=260).pack(fill="x", pady=(5, 0))
+        ttk.Label(character_queue, textvariable=self.char_job_error_var, foreground="#9c1c1c", wraplength=360).pack(fill="x", pady=(3, 0))
         ttk.Label(parent, textvariable=self.char_status_var).pack(fill="x", padx=4, pady=3)
         self._refresh_saved_characters()
         self._refresh_jobs()
@@ -6126,23 +6171,66 @@ class GearPrinterApp:
             self.catalog_tree.selection_set(iid)
             self.spooler.enqueue([self.item_by_iid[iid]], 1, priority=True)
 
+    def _toggle_printing_suspended(self) -> None:
+        suspended = bool(self.suspend_printing_var.get())
+        self.spooler.set_suspended(suspended)
+        self.queue_status_var.set(
+            "Thermal printing suspended; queued entries will remain pending."
+            if suspended
+            else "Thermal printing resumed."
+        )
+
+    def _send_selected_jobs_to_clipboard(self, tree: ttk.Treeview, mapping: dict[str, str]) -> None:
+        job_ids = tuple(
+            job_id
+            for iid in tree.selection()
+            if (job_id := mapping.get(iid)) is not None
+        )
+        if not job_ids:
+            messagebox.showwarning("Nothing selected", "Select one or more queued entries first.")
+            return
+
+        claimed = self.spooler.claim_for_clipboard(job_ids)
+        if not claimed:
+            messagebox.showwarning(
+                "Nothing available",
+                "Only pending or failed queue entries with outstanding copies can be sent to the clipboard.",
+            )
+            return
+
+        claimed_ids = tuple(job.id for job in claimed)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(queue_clipboard_text(claimed))
+        except tk.TclError as exc:
+            self.spooler.release_clipboard_claim(claimed_ids)
+            messagebox.showerror("Clipboard unavailable", f"Could not update the clipboard: {exc}")
+            return
+
+        completed = self.spooler.finish_clipboard_claim(claimed_ids)
+        copy_count = sum(job.remaining_copies for job in claimed if job.id in completed)
+        self.queue_status_var.set(
+            f"Copied {copy_count} queued print{'s' if copy_count != 1 else ''} "
+            f"from {len(completed)} entr{'ies' if len(completed) != 1 else 'y'}; marked completed."
+        )
+
     def _refresh_jobs(self) -> None:
-        selected_job = self._selected_job_id()
-        selected_char_job = self._selected_char_job_id() if hasattr(self, "char_spool_tree") else None
+        selected_jobs = self._selected_job_ids()
+        selected_char_jobs = self._selected_char_job_ids() if hasattr(self, "char_spool_tree") else ()
         jobs = self.spooler.jobs()
-        self._populate_spool_tree(self.spool_tree, self.job_by_iid, jobs, selected_job)
+        self._populate_spool_tree(self.spool_tree, self.job_by_iid, jobs, selected_jobs)
         if hasattr(self, "char_spool_tree"):
-            self._populate_spool_tree(self.char_spool_tree, self.char_job_by_iid, jobs, selected_char_job)
+            self._populate_spool_tree(self.char_spool_tree, self.char_job_by_iid, jobs, selected_char_jobs)
         if not self.printer.connected and any(job.status == JobStatus.FAILED for job in jobs):
             self.printer_status_var.set("Printer: disconnected after print failure — queue paused")
         self._show_job_error()
         self._show_char_job_error()
 
     @staticmethod
-    def _populate_spool_tree(tree: ttk.Treeview, mapping: dict[str, str], jobs, selected_job: str | None) -> None:
+    def _populate_spool_tree(tree: ttk.Treeview, mapping: dict[str, str], jobs, selected_jobs: tuple[str, ...]) -> None:
         tree.delete(*tree.get_children())
         mapping.clear()
-        restore = None
+        restore: list[str] = []
         for index, job in enumerate(jobs):
             iid = f"job-{index}"
             mapping[iid] = job.id
@@ -6150,14 +6238,21 @@ class GearPrinterApp:
             if job.status == JobStatus.CANCELED:
                 copies = f"—/{job.total_copies}"
             tree.insert("", "end", iid=iid, values=(job.item.name, job.item.category, copies, job.status.value))
-            if job.id == selected_job:
-                restore = iid
+            if job.id in selected_jobs:
+                restore.append(iid)
         if restore:
-            tree.selection_set(restore)
+            tree.selection_set(*restore)
+
+    def _selected_job_ids(self) -> tuple[str, ...]:
+        return tuple(
+            job_id
+            for iid in self.spool_tree.selection()
+            if (job_id := self.job_by_iid.get(iid)) is not None
+        )
 
     def _selected_job_id(self) -> str | None:
-        selection = self.spool_tree.selection()
-        return self.job_by_iid.get(selection[0]) if selection else None
+        selected = self._selected_job_ids()
+        return selected[0] if selected else None
 
     def _selected_job(self):
         job_id = self._selected_job_id()
@@ -6167,11 +6262,18 @@ class GearPrinterApp:
         job = self._selected_job()
         self.job_error_var.set(job.error if job else "")
 
-    def _selected_char_job_id(self) -> str | None:
+    def _selected_char_job_ids(self) -> tuple[str, ...]:
         if not hasattr(self, "char_spool_tree"):
-            return None
-        selection = self.char_spool_tree.selection()
-        return self.char_job_by_iid.get(selection[0]) if selection else None
+            return ()
+        return tuple(
+            job_id
+            for iid in self.char_spool_tree.selection()
+            if (job_id := self.char_job_by_iid.get(iid)) is not None
+        )
+
+    def _selected_char_job_id(self) -> str | None:
+        selected = self._selected_char_job_ids()
+        return selected[0] if selected else None
 
     def _show_char_job_error(self, _event=None) -> None:
         if not hasattr(self, "char_job_error_var"):

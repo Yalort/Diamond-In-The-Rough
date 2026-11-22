@@ -1,6 +1,6 @@
 # CTP500 Live Gear and Minion Printer
 
-Current release: **v1.2.10**
+Current release: **v1.2.11**
 
 ## Download
 
@@ -16,7 +16,7 @@ never performed automatically. Use **Check for updates** to check again at any t
 
 ## Release builds
 
-Push a tag matching the application version (for example, `v1.2.10`) to run the
+Push a tag matching the application version (for example, `v1.2.11`) to run the
 Windows release workflow. The workflow runs the test suite, verifies that the tag
 matches `ctp500_app/_version.py`, and publishes a versioned standalone executable
 and SHA-256 checksum to the corresponding GitHub Release.
@@ -73,9 +73,15 @@ python CTP500_GUI_app_Github_Export.py
    multiple items.
 3. Choose a copy count and select **Queue selected**. Double-clicking an item
    puts one copy at the front of the pending queue.
-4. Pending jobs may be canceled. Canceling a printing job lets the current tag
+4. Ctrl-click or Shift-click queue entries, then choose **Send to clipboard**
+   to copy each outstanding print as digital text and mark those entries as
+   completed.
+5. Select **Suspend printing** to keep pending entries from reaching the
+   thermal printer. If a copy is already being transferred, that copy finishes
+   before the remaining copies pause.
+6. Pending jobs may be canceled. Canceling a printing job lets the current tag
    finish, then cancels its remaining copies.
-5. A printer error pauses the queue. Reconnect if necessary, then use **Retry**
+7. A printer error pauses the queue. Reconnect if necessary, then use **Retry**
    or **Remove** on the failed job.
 
 ## Character Creator
